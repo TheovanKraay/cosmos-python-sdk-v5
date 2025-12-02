@@ -19,6 +19,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 futures = "0.3"
 typespec = "0.10"
+once_cell = "1.19"
 
 [profile.release]
 opt-level = 3

@@ -4,6 +4,15 @@ use azure_data_cosmos::{CosmosClient as RustCosmosClient, models::{ContainerProp
 use std::sync::Arc;
 use crate::container::ContainerClient;
 use crate::exceptions::map_error;
+use once_cell::sync::Lazy;
+use tokio::runtime::Runtime;
+
+static TOKIO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime")
+});
 
 #[pyclass(subclass)]
 pub struct DatabaseClient {
@@ -24,14 +33,12 @@ impl DatabaseClient {
 impl DatabaseClient {
     /// Create a new container
     #[pyo3(signature = (id, partition_key, **kwargs))]
-    pub fn create_container<'py>(
+    pub fn create_container(
         &self,
-        py: Python<'py>,
         id: String,
         partition_key: &PyDict,
         kwargs: Option<&PyDict>,
-    ) -> PyResult<&'py PyDict> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+    ) -> PyResult<ContainerClient> {
         let db_client = self.cosmos_client.database_client(&self.database_id);
         
         // Extract partition key path
@@ -43,7 +50,7 @@ impl DatabaseClient {
             .clone();
         
         let container_id = id.clone();
-        runtime.block_on(async move {
+        TOKIO_RUNTIME.block_on(async move {
             let props = ContainerProperties {
                 id: container_id.into(),
                 partition_key: PartitionKeyDefinition::from(partition_key_path),
@@ -54,9 +61,12 @@ impl DatabaseClient {
                 .map_err(map_error)
         })?;
 
-        let dict = PyDict::new(py);
-        dict.set_item("id", id)?;
-        Ok(dict)
+        // Return ContainerClient like V4 does
+        Ok(ContainerClient::new(
+            self.cosmos_client.clone(),
+            self.database_id.clone(),
+            id,
+        ))
     }
 
     /// Get a container client
@@ -76,10 +86,9 @@ impl DatabaseClient {
         container_id: String,
         kwargs: Option<&PyDict>,
     ) -> PyResult<()> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let db_client = self.cosmos_client.database_client(&self.database_id);
         
-        runtime.block_on(async move {
+        TOKIO_RUNTIME.block_on(async move {
             let container = db_client.container_client(&container_id);
             container.delete(None)
                 .await
@@ -96,10 +105,9 @@ impl DatabaseClient {
         py: Python<'py>,
         kwargs: Option<&PyDict>,
     ) -> PyResult<&'py PyDict> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let db_client = self.cosmos_client.database_client(&self.database_id);
         
-        runtime.block_on(async move {
+        TOKIO_RUNTIME.block_on(async move {
             db_client.read(None)
                 .await
                 .map_err(map_error)
@@ -117,10 +125,9 @@ impl DatabaseClient {
         py: Python<'py>,
         kwargs: Option<&PyDict>,
     ) -> PyResult<Vec<&'py PyDict>> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let db_client = self.cosmos_client.database_client(&self.database_id);
         
-        let containers = runtime.block_on(async move {
+        let containers = TOKIO_RUNTIME.block_on(async move {
             let mut result = Vec::new();
             let mut stream = db_client.query_containers("SELECT * FROM containers", None).map_err(map_error)?;
             
@@ -148,10 +155,9 @@ impl DatabaseClient {
     /// Delete this database
     #[pyo3(signature = (**kwargs))]
     pub fn delete(&self, kwargs: Option<&PyDict>) -> PyResult<()> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let db_client = self.cosmos_client.database_client(&self.database_id);
         
-        runtime.block_on(async move {
+        TOKIO_RUNTIME.block_on(async move {
             db_client.delete(None)
                 .await
                 .map_err(map_error)

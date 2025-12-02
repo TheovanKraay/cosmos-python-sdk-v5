@@ -1,0 +1,17 @@
+# Ignore virtual environments
+venv_v4/
+venv_v5/
+
+# Ignore benchmark results
+benchmark_results.json
+*.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# OS files
+.DS_Store
+Thumbs.db

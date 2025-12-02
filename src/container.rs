@@ -6,6 +6,16 @@ use std::sync::Arc;
 use serde_json::Value;
 use crate::exceptions::map_error;
 use crate::utils::py_dict_to_json;
+use once_cell::sync::Lazy;
+use tokio::runtime::Runtime;
+
+// Global Tokio runtime - reused across all operations for better performance
+static TOKIO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime")
+});
 
 #[pyclass(subclass)]
 pub struct ContainerClient {
@@ -34,7 +44,6 @@ impl ContainerClient {
         body: &'py PyDict,
         kwargs: Option<&PyDict>,
     ) -> PyResult<&'py PyDict> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let container = self.cosmos_client
             .database_client(&self.database_id)
             .container_client(&self.container_id);
@@ -45,7 +54,7 @@ impl ContainerClient {
         // Extract partition key from body or kwargs
         let partition_key = self.extract_partition_key(py, body, kwargs)?;
         
-        let result = runtime.block_on(async move {
+        let _result = TOKIO_RUNTIME.block_on(async move {
             container.create_item(partition_key, item_value, None)
                 .await
                 .map_err(map_error)
@@ -64,7 +73,6 @@ impl ContainerClient {
         partition_key: PyObject,
         kwargs: Option<&PyDict>,
     ) -> PyResult<&'py PyDict> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let container = self.cosmos_client
             .database_client(&self.database_id)
             .container_client(&self.container_id);
@@ -72,7 +80,7 @@ impl ContainerClient {
         let pk = self.python_to_partition_key(py, partition_key)?;
         let item_id = item.clone();
         
-        let result = runtime.block_on(async move {
+        let result = TOKIO_RUNTIME.block_on(async move {
             container.read_item::<Value>(pk, &item_id, None)
                 .await
                 .map_err(map_error)
@@ -98,7 +106,6 @@ impl ContainerClient {
         body: &'py PyDict,
         kwargs: Option<&PyDict>,
     ) -> PyResult<&'py PyDict> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let container = self.cosmos_client
             .database_client(&self.database_id)
             .container_client(&self.container_id);
@@ -107,7 +114,7 @@ impl ContainerClient {
         
         let partition_key = self.extract_partition_key(py, body, kwargs)?;
         
-        let result = runtime.block_on(async move {
+        let _result = TOKIO_RUNTIME.block_on(async move {
             container.upsert_item(partition_key, item_value, None)
                 .await
                 .map_err(map_error)
@@ -125,7 +132,6 @@ impl ContainerClient {
         body: &'py PyDict,
         kwargs: Option<&PyDict>,
     ) -> PyResult<&'py PyDict> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let container = self.cosmos_client
             .database_client(&self.database_id)
             .container_client(&self.container_id);
@@ -135,7 +141,7 @@ impl ContainerClient {
         let partition_key = self.extract_partition_key(py, body, kwargs)?;
         let item_id = item.clone();
         
-        let result = runtime.block_on(async move {
+        let _result = TOKIO_RUNTIME.block_on(async move {
             container.replace_item(partition_key, &item_id, item_value, None)
                 .await
                 .map_err(map_error)
@@ -153,7 +159,6 @@ impl ContainerClient {
         partition_key: PyObject,
         kwargs: Option<&PyDict>,
     ) -> PyResult<()> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let container = self.cosmos_client
             .database_client(&self.database_id)
             .container_client(&self.container_id);
@@ -161,7 +166,7 @@ impl ContainerClient {
         let pk = self.python_to_partition_key(py, partition_key)?;
         let item_id = item.clone();
         
-        runtime.block_on(async move {
+        TOKIO_RUNTIME.block_on(async move {
             container.delete_item(pk, &item_id, None)
                 .await
                 .map_err(map_error)
@@ -178,7 +183,6 @@ impl ContainerClient {
         query: String,
         kwargs: Option<&PyDict>,
     ) -> PyResult<Vec<&'py PyDict>> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let container = self.cosmos_client
             .database_client(&self.database_id)
             .container_client(&self.container_id);
@@ -194,7 +198,7 @@ impl ContainerClient {
             None
         };
         
-        let items = runtime.block_on(async move {
+        let items = TOKIO_RUNTIME.block_on(async move {
             let mut result = Vec::new();
             
             // If no partition key is provided, we need to do a cross-partition query
@@ -264,12 +268,11 @@ impl ContainerClient {
     /// Delete this container
     #[pyo3(signature = (**kwargs))]
     pub fn delete(&self, kwargs: Option<&PyDict>) -> PyResult<()> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let container = self.cosmos_client
             .database_client(&self.database_id)
             .container_client(&self.container_id);
         
-        runtime.block_on(async move {
+        TOKIO_RUNTIME.block_on(async move {
             container.delete(None)
                 .await
                 .map_err(map_error)

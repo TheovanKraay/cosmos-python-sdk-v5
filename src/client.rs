@@ -4,6 +4,15 @@ use azure_data_cosmos::CosmosClient as RustCosmosClient;
 use std::sync::Arc;
 use crate::database::DatabaseClient;
 use crate::exceptions::map_error;
+use once_cell::sync::Lazy;
+use tokio::runtime::Runtime;
+
+static TOKIO_RUNTIME: Lazy<Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create Tokio runtime")
+});
 
 #[pyclass(subclass)]
 pub struct CosmosClient {
@@ -46,25 +55,22 @@ impl CosmosClient {
 
     /// Create a new database
     #[pyo3(signature = (id, **kwargs))]
-    pub fn create_database<'py>(
+    pub fn create_database(
         &self,
-        py: Python<'py>,
         id: String,
         kwargs: Option<&PyDict>,
-    ) -> PyResult<&'py PyDict> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+    ) -> PyResult<DatabaseClient> {
         let client = self.inner.clone();
         let id_clone = id.clone();
         
-        let result = runtime.block_on(async move {
+        let _result = TOKIO_RUNTIME.block_on(async move {
             client.create_database(&id_clone, None)
                 .await
                 .map_err(map_error)
         })?;
 
-        let dict = PyDict::new(py);
-        dict.set_item("id", id)?;
-        Ok(dict)
+        // Return DatabaseClient like V4 does
+        Ok(DatabaseClient::new(self.inner.clone(), id))
     }
 
     /// Get a database client
@@ -80,10 +86,9 @@ impl CosmosClient {
         database_id: String,
         kwargs: Option<&PyDict>,
     ) -> PyResult<()> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let client = self.inner.database_client(&database_id);
         
-        runtime.block_on(async move {
+        TOKIO_RUNTIME.block_on(async move {
             client.delete(None)
                 .await
                 .map_err(map_error)
@@ -99,10 +104,9 @@ impl CosmosClient {
         py: Python<'py>,
         kwargs: Option<&PyDict>,
     ) -> PyResult<Vec<&'py PyDict>> {
-        let runtime = tokio::runtime::Runtime::new().unwrap();
         let client = self.inner.clone();
         
-        let databases = runtime.block_on(async move {
+        let databases = TOKIO_RUNTIME.block_on(async move {
             let mut result = Vec::new();
             let mut stream = client.query_databases("SELECT * FROM databases", None).map_err(map_error)?;
             
