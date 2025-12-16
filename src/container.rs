@@ -5,7 +5,7 @@ use azure_data_cosmos::PartitionKey as RustPartitionKey;
 use std::sync::Arc;
 use serde_json::Value;
 use crate::exceptions::map_error;
-use crate::utils::py_dict_to_json;
+use crate::utils::py_object_to_json;
 use once_cell::sync::Lazy;
 use tokio::runtime::Runtime;
 
@@ -37,22 +37,28 @@ impl ContainerClient {
 #[pymethods]
 impl ContainerClient {
     /// Create a new item
+    /// Accepts either a dict or a JSON string for the body
     #[pyo3(signature = (body, **kwargs))]
     pub fn create_item<'py>(
         &self,
         py: Python<'py>,
-        body: &'py PyDict,
+        body: &'py PyAny,
         kwargs: Option<&PyDict>,
     ) -> PyResult<&'py PyDict> {
         let container = self.cosmos_client
             .database_client(&self.database_id)
             .container_client(&self.container_id);
         
-        // Convert Python dict to JSON
-        let item_value = py_dict_to_json(py, body)?;
+        // Convert Python object (dict or string) to JSON using hybrid approach
+        let item_value = py_object_to_json(py, body)?;
         
         // Extract partition key from body or kwargs
-        let partition_key = self.extract_partition_key(py, body, kwargs)?;
+        let partition_key = if let Ok(dict) = body.downcast::<PyDict>() {
+            self.extract_partition_key(py, dict, kwargs)?
+        } else {
+            // If body is a string, partition key must come from kwargs
+            self.extract_partition_key_from_kwargs(kwargs)?
+        };
         
         let _result = TOKIO_RUNTIME.block_on(async move {
             container.create_item(partition_key, item_value, None)
@@ -60,8 +66,14 @@ impl ContainerClient {
                 .map_err(map_error)
         })?;
 
-        // Return the created item as dict
-        Ok(body)
+        // Return the created item as dict (convert if it was a string)
+        if let Ok(dict) = body.downcast::<PyDict>() {
+            Ok(dict)
+        } else {
+            // If input was a string, we need to convert it back to dict for return
+            let json_module = py.import("json")?;
+            json_module.call_method1("loads", (body,))?.extract()
+        }
     }
 
     /// Read an item by ID and partition key
@@ -99,20 +111,27 @@ impl ContainerClient {
     }
 
     /// Upsert an item (create or replace)
+    /// Accepts either a dict or a JSON string for the body
     #[pyo3(signature = (body, **kwargs))]
     pub fn upsert_item<'py>(
         &self,
         py: Python<'py>,
-        body: &'py PyDict,
+        body: &'py PyAny,
         kwargs: Option<&PyDict>,
     ) -> PyResult<&'py PyDict> {
         let container = self.cosmos_client
             .database_client(&self.database_id)
             .container_client(&self.container_id);
         
-        let item_value = py_dict_to_json(py, body)?;
+        // Convert Python object (dict or string) to JSON using hybrid approach
+        let item_value = py_object_to_json(py, body)?;
         
-        let partition_key = self.extract_partition_key(py, body, kwargs)?;
+        // Extract partition key from body or kwargs
+        let partition_key = if let Ok(dict) = body.downcast::<PyDict>() {
+            self.extract_partition_key(py, dict, kwargs)?
+        } else {
+            self.extract_partition_key_from_kwargs(kwargs)?
+        };
         
         let _result = TOKIO_RUNTIME.block_on(async move {
             container.upsert_item(partition_key, item_value, None)
@@ -120,25 +139,38 @@ impl ContainerClient {
                 .map_err(map_error)
         })?;
 
-        Ok(body)
+        // Return the created item as dict (convert if it was a string)
+        if let Ok(dict) = body.downcast::<PyDict>() {
+            Ok(dict)
+        } else {
+            let json_module = py.import("json")?;
+            json_module.call_method1("loads", (body,))?.extract()
+        }
     }
 
     /// Replace an item
+    /// Accepts either a dict or a JSON string for the body
     #[pyo3(signature = (item, body, **kwargs))]
     pub fn replace_item<'py>(
         &self,
         py: Python<'py>,
         item: String,
-        body: &'py PyDict,
+        body: &'py PyAny,
         kwargs: Option<&PyDict>,
     ) -> PyResult<&'py PyDict> {
         let container = self.cosmos_client
             .database_client(&self.database_id)
             .container_client(&self.container_id);
         
-        let item_value = py_dict_to_json(py, body)?;
+        // Convert Python object (dict or string) to JSON using hybrid approach
+        let item_value = py_object_to_json(py, body)?;
         
-        let partition_key = self.extract_partition_key(py, body, kwargs)?;
+        // Extract partition key from body or kwargs
+        let partition_key = if let Ok(dict) = body.downcast::<PyDict>() {
+            self.extract_partition_key(py, dict, kwargs)?
+        } else {
+            self.extract_partition_key_from_kwargs(kwargs)?
+        };
         let item_id = item.clone();
         
         let _result = TOKIO_RUNTIME.block_on(async move {
@@ -147,7 +179,13 @@ impl ContainerClient {
                 .map_err(map_error)
         })?;
 
-        Ok(body)
+        // Return the created item as dict (convert if it was a string)
+        if let Ok(dict) = body.downcast::<PyDict>() {
+            Ok(dict)
+        } else {
+            let json_module = py.import("json")?;
+            json_module.call_method1("loads", (body,))?.extract()
+        }
     }
 
     /// Delete an item
@@ -312,8 +350,8 @@ impl ContainerClient {
         }
         
         // Otherwise, try common partition key fields from the body
-        // Try common partition key field names
-        let common_pk_fields = ["category", "partitionKey", "pk", "type", "tenantId"];
+        // Try common partition key field names (including "id" which is very common)
+        let common_pk_fields = ["id", "category", "partitionKey", "pk", "type", "tenantId"];
         for field in &common_pk_fields {
             if let Ok(Some(value)) = body.get_item(field) {
                 return self.python_to_partition_key(py, value.into());
@@ -321,7 +359,21 @@ impl ContainerClient {
         }
         
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "Could not determine partition key. Please provide 'partition_key' parameter or ensure the document contains a common partition key field (category, partitionKey, pk, type, or tenantId)."
+            "Partition key not found in body or kwargs"
         ))
+    }
+    
+    fn extract_partition_key_from_kwargs(&self, kwargs: Option<&PyDict>) -> PyResult<RustPartitionKey> {
+        Python::with_gil(|py| {
+            if let Some(kw) = kwargs {
+                if let Ok(Some(pk)) = kw.get_item("partition_key") {
+                    return self.python_to_partition_key(py, pk.into());
+                }
+            }
+            
+            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Partition key must be provided in kwargs when body is a JSON string"
+            ))
+        })
     }
 }

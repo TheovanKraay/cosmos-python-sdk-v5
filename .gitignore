@@ -36,3 +36,9 @@ htmlcov/
 *.swp
 *.swo
 *~
+
+# Benchmark results and temporary files
+HYBRID_API_RESULTS.md
+benchmark_results_hybrid.json
+benchmarks/benchmark_hybrid.py
+benchmarks/micro_benchmark_string.py

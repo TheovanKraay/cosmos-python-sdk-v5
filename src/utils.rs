@@ -2,12 +2,37 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use serde_json::Value;
 use std::collections::HashMap;
+use pythonize::depythonize;
 
-/// Convert Python dict to serde_json::Value
+/// Convert Python object (dict or string) to serde_json::Value
+/// Hybrid approach: accepts both PyDict (PyO3 native serialization) and String (direct serde parsing)
+pub fn py_object_to_json(py: Python, obj: &PyAny) -> PyResult<Value> {
+    // Fast path: if it's already a JSON string, parse directly with serde
+    if let Ok(json_str) = obj.extract::<String>() {
+        return serde_json::from_str(&json_str)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Invalid JSON string: {}", e)
+            ));
+    }
+    
+    // Compatible path: if it's a dict, use PyO3's native serialization (faster than Python's json.dumps)
+    if let Ok(dict) = obj.downcast::<PyDict>() {
+        return depythonize(dict)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Failed to serialize dict: {}", e)
+            ));
+    }
+    
+    // Fallback: try to depythonize any Python object
+    depythonize(obj)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!("Failed to serialize Python object: {}", e)
+        ))
+}
+
+/// Convert Python dict to serde_json::Value (legacy function, kept for compatibility)
 pub fn py_dict_to_json(py: Python, dict: &PyDict) -> PyResult<Value> {
-    let json_module = py.import("json")?;
-    let json_str = json_module.call_method1("dumps", (dict,))?.extract::<String>()?;
-    serde_json::from_str(&json_str)
+    depythonize(dict)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid JSON: {}", e)))
 }
 
